@@ -3,26 +3,23 @@
 #![no_main]
 #![cfg_attr(target_os = "windows", windows_subsystem = "console")]
 
+use core::ffi::{c_char, CStr};
 use arrayvec::ArrayVec;
 use fchashmap::FcHashMap;
 use libc_print::libc_println;
 use static_alloc::Bump;
-
-use without_alloc::{alloc::LocalAllocLeakExt, Box};
+use without_alloc::alloc::LocalAllocLeakExt;
+use without_alloc::Box;
 
 static SLAB: Bump<[Json<'static>; 1024]> = Bump::uninit();
 
 #[derive(Debug)]
 pub enum Json<'a> {
+    Object(FcHashMap<&'a str, Option<Box<'a, Json<'a>>>, 16>),
+    Array(ArrayVec<Option<Box<'a, Json<'a>>>, 16>),
     Null,
     Number(&'a str),
     Bool(bool),
-    Object(FcHashMap<&'a str, Option<Box<'a, Json<'a>>>, 24>),
-    Pair {
-        key: &'a str,
-        value: Option<Box<'a, Json<'a>>>,
-    },
-    Array(ArrayVec<Option<Box<'a, Json<'a>>>, 24>),
     String(&'a str),
 }
 
@@ -36,17 +33,14 @@ peg::parser!(grammar parser() for str {
     rule value_separator() = _ "," _
 
     rule value() -> Json<'input>
-        = "false" { Json::Bool(false) }
-        / "true" { Json::Bool(true) }
+        =
+         b:("true" {true} / "false" {false}) { Json::Bool(b) }
         / "null" { Json::Null }
-        / "{" _ pair:(key:string() _ ":" _ value:value() { (key, value) }) **<,32> value_separator() _ "}"  { Json::Object(pair.into_iter().map(|(k,v)| (k, SLAB.boxed(v))).collect()) }
-        / "[" _ val:value() **<,32> value_separator() _ "]" { Json::Array(val.into_iter().map(|x| SLAB.boxed(x)).collect()) }
-        / s:number() { Json::Number(s) }
+        / s:$("-"? int() frac()? exp()?) { Json::Number(s) }
         / s:string() { Json::String(s) }
+        / "{" _ pair:(key:string() _ ":" _ value:value() { (key, SLAB.boxed(value)) }) **<,32> value_separator() _ "}"  { Json::Object(pair.into_iter().collect()) }
+        / "[" _ val:value() **<,32> value_separator() _ "]" { Json::Array(val.into_iter().map(|x| SLAB.boxed(x)).collect()) }
 
-
-    rule number() ->  &'input str
-        = s:$("-"? int() frac()? exp()?) { s }
 
     rule int()
         = ['0'] / ['1'..='9']['0'..='9']*
@@ -67,35 +61,15 @@ peg::parser!(grammar parser() for str {
 });
 
 #[no_mangle]
-pub extern "C" fn main(argc: usize, argv: *const *const u8) -> isize {
-    let _args = unsafe { core::slice::from_raw_parts(argv, argc) };
+pub extern "C" fn main(argc: usize, argv: *const *const c_char) -> isize {
+    let args = unsafe { core::slice::from_raw_parts(argv, argc) };
+    let mut args = args.into_iter().map(|&x| unsafe { CStr::from_ptr(x) });
 
-    let input = r#"
-{
-	"X": 0.6e2,
-	"Y": 5,
-	"Z": -5.312344,
-	"Bool": false,
-	"Bool": true,
-	"Null": null,
-	"Attr": {
-		"Name": "bla",
-		"Siblings": [6, 1, 2, {}, {}, {}]
-	},
-	"Nested Array": [[[[[[[[[]]]]]]]]],
-	"Obj": {
-		"Child": {
-			"A": [],
-			"Child": {
-				"Child": {}
-			}
-		}
-	}
-}
-"#;
-    let x = parser::json(input);
+    match args.nth(1) {
+        Some(arg) => libc_println!("{:#?}", parser::json(arg.to_str().unwrap())),
+        None => {}
+    };
 
-    libc_println!("{:#?}", x);
     0
 }
 
