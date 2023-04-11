@@ -1,22 +1,30 @@
-#![feature(lang_items, start, core_intrinsics, libc)]
+#![feature(lang_items, core_intrinsics)]
 #![no_std]
 #![no_main]
 #![cfg_attr(target_os = "windows", windows_subsystem = "console")]
 
 use core::ffi::{c_char, CStr};
-use arrayvec::ArrayVec;
+use derivative::Derivative;
 use fchashmap::FcHashMap;
 use libc_print::libc_println;
 use static_alloc::Bump;
 use without_alloc::alloc::LocalAllocLeakExt;
-use without_alloc::Box;
+use without_alloc::{Box, FixedVec};
 
-static SLAB: Bump<[Json<'static>; 1024]> = Bump::uninit();
+static SLAB: Bump<[Json<'static>; 4096]> = Bump::uninit();
 
-#[derive(Debug)]
+fn print_array<'a>(
+    arr: &Option<FixedVec<'a, Json<'a>>>,
+    fmt: &mut core::fmt::Formatter,
+) -> core::fmt::Result {
+    write!(fmt, "{:#?}", arr.as_ref().map(|x| x.as_slice()))
+}
+
+#[derive(Derivative)]
+#[derivative(Debug)]
 pub enum Json<'a> {
-    Object(FcHashMap<&'a str, Option<Box<'a, Json<'a>>>, 16>),
-    Array(ArrayVec<Option<Box<'a, Json<'a>>>, 16>),
+    Object(FcHashMap<&'a str, Option<Box<'a, Json<'a>>>, 64>),
+    Array(#[derivative(Debug(format_with = "print_array"))] Option<FixedVec<'a, Json<'a>>>),
     Null,
     Number(&'a str),
     Bool(bool),
@@ -38,8 +46,16 @@ peg::parser!(grammar parser() for str {
         / "null" { Json::Null }
         / s:$("-"? int() frac()? exp()?) { Json::Number(s) }
         / s:string() { Json::String(s) }
-        / "{" _ pair:(key:string() _ ":" _ value:value() { (key, SLAB.boxed(value)) }) **<,32> value_separator() _ "}"  { Json::Object(pair.into_iter().collect()) }
-        / "[" _ val:value() **<,32> value_separator() _ "]" { Json::Array(val.into_iter().map(|x| SLAB.boxed(x)).collect()) }
+        / "{" _ pair:(key:string() _ ":" _ value:value() { (key, SLAB.boxed(value)) }) **<, 1024> value_separator() _ "}"  {
+            Json::Object(pair.into_iter().collect())
+        }
+        / "[" _ val:value() **<, 128> value_separator() _ "]" {
+            let mut vec = SLAB.fixed_vec(val.len());
+            if let Some(ref mut vec) = vec {
+                vec.extend(val.into_iter());
+            }
+            Json::Array(vec)
+        }
 
 
     rule int()
