@@ -3,26 +3,26 @@
 #![no_main]
 #![cfg_attr(target_os = "windows", windows_subsystem = "console")]
 
-#[global_allocator]
-static ALLOCATOR: libc_alloc::LibcAlloc = libc_alloc::LibcAlloc;
-
-use alloc::boxed::Box;
+use arrayvec::ArrayVec;
+use fchashmap::FcHashMap;
 use libc_print::libc_println;
-use peg::__private::ArrayVec;
+use static_alloc::Bump;
 
-extern crate alloc;
+use without_alloc::{alloc::LocalAllocLeakExt, Box};
+
+static SLAB: Bump<[Json<'static>; 1024]> = Bump::uninit();
 
 #[derive(Debug)]
 pub enum Json<'a> {
     Null,
-    Number(f64),
+    Number(&'a str),
     Bool(bool),
-    Object(ArrayVec<Box<Json<'a>>, 32>),
+    Object(FcHashMap<&'a str, Option<Box<'a, Json<'a>>>, 24>),
     Pair {
-        key: Box<Json<'a>>,
-        value: Box<Json<'a>>,
+        key: &'a str,
+        value: Option<Box<'a, Json<'a>>>,
     },
-    Array(ArrayVec<Box<Json<'a>>, 32>),
+    Array(ArrayVec<Option<Box<'a, Json<'a>>>, 24>),
     String(&'a str),
 }
 
@@ -30,7 +30,7 @@ peg::parser!(grammar parser() for str {
     // JSON grammar (RFC 4627). Note that this only checks for valid JSON and does not build a syntax
     // tree.
 
-    pub rule json() -> Json<'input> = _ s:(object() / array()) _ { s }
+    pub rule json() -> Json<'input> = _ s:(value()) _ { s }
 
     rule _() = [' ' | '\t' | '\r' | '\n']*
     rule value_separator() = _ "," _
@@ -39,22 +39,14 @@ peg::parser!(grammar parser() for str {
         = "false" { Json::Bool(false) }
         / "true" { Json::Bool(true) }
         / "null" { Json::Null }
-        / object()
-        / array()
-        / number()
-        / string()
+        / "{" _ pair:(key:string() _ ":" _ value:value() { (key, value) }) **<,32> value_separator() _ "}"  { Json::Object(pair.into_iter().map(|(k,v)| (k, SLAB.boxed(v))).collect()) }
+        / "[" _ val:value() **<,32> value_separator() _ "]" { Json::Array(val.into_iter().map(|x| SLAB.boxed(x)).collect()) }
+        / s:number() { Json::Number(s) }
+        / s:string() { Json::String(s) }
 
-    rule object() -> Json<'input>
-        = "{" _ pair:member() **<,32> value_separator() _ "}" { Json::Object(pair.into_iter().map(Box::new).collect()) }
 
-    rule member() -> Json<'input>
-        = key:string() _ ":" _ value:value() { Json::Pair { key: Box::new(key), value: Box::new(value) } }
-
-    rule array() -> Json<'input>
-        = "[" _ val:value() **<,32> value_separator() _ "]" { Json::Array(val.into_iter().map(Box::new).collect()) }
-
-    rule number() -> Json<'input>
-        = s:$("-"? int() frac()? exp()?) {? Ok(Json::Number(fast_float::parse(s).map_err(|x| "not a number")?)) }
+    rule number() ->  &'input str
+        = s:$("-"? int() frac()? exp()?) { s }
 
     rule int()
         = ['0'] / ['1'..='9']['0'..='9']*
@@ -66,8 +58,12 @@ peg::parser!(grammar parser() for str {
         = "." ['0'..='9']*<1,32>
 
     // note: escaped chars not handled
-    rule string() -> Json<'input>
-        = str:$("\"" (!"\"" [_])* "\"") { Json::String(str) }
+    rule string() -> &'input str = str:$("\"" (!"\"" [_])* "\"") {
+        let mut s = str.chars();
+        s.next();
+        s.next_back();
+        s.as_str()
+    }
 });
 
 #[no_mangle]
