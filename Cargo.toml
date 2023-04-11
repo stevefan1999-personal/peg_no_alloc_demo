@@ -6,7 +6,10 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+arrayvec = { version = "0.7.2", default-features = false }
+fast-float = { git = "https://github.com/quartiq/fast-float-rust", branch = "lib-no-std", version = "0.2.0", default-features = false }
 libc-print = "0.1.21"
+libc_alloc = "1.0.4"
 peg = { git = "https://github.com/stevefan1999-personal/rust-peg", branch = "patch-unstable-vectors", version = "0.8.1", default-features = false, features = ["unstable", "arrayvec"] }
 vc-ltl = "5.0.5"
 

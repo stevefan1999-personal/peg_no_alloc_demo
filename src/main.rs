@@ -1,49 +1,60 @@
-#![feature(lang_items)]
-#![feature(start)]
-#![feature(core_intrinsics)]
-#![feature(libc)]
+#![feature(lang_items, start, core_intrinsics, libc)]
 #![no_std]
 #![no_main]
+#![cfg_attr(target_os = "windows", windows_subsystem = "console")]
 
-#![cfg(target_os = "windows")]
-#![windows_subsystem = "console"]
+#[global_allocator]
+static ALLOCATOR: libc_alloc::LibcAlloc = libc_alloc::LibcAlloc;
 
-#[cfg_attr(target_os = "windows", link(name = "msvcrt"))]
-extern {}
-
-
+use alloc::boxed::Box;
 use libc_print::libc_println;
+use peg::__private::ArrayVec;
 
-#[lang = "eh_personality"]
-extern "C" fn rust_eh_personality() {}
-#[lang = "panic_impl"]
-extern "C" fn rust_begin_panic(_: &core::panic::PanicInfo) -> ! {
-    core::intrinsics::abort()
+extern crate alloc;
+
+#[derive(Debug)]
+pub enum Json<'a> {
+    Null,
+    Number(f64),
+    Bool(bool),
+    Object(ArrayVec<Box<Json<'a>>, 32>),
+    Pair {
+        key: Box<Json<'a>>,
+        value: Box<Json<'a>>,
+    },
+    Array(ArrayVec<Box<Json<'a>>, 32>),
+    String(&'a str),
 }
 
 peg::parser!(grammar parser() for str {
     // JSON grammar (RFC 4627). Note that this only checks for valid JSON and does not build a syntax
     // tree.
 
-    pub rule json() = _ (object() / array()) _
+    pub rule json() -> Json<'input> = _ s:(object() / array()) _ { s }
 
     rule _() = [' ' | '\t' | '\r' | '\n']*
     rule value_separator() = _ "," _
 
-    rule value()
-        = "false" / "true" / "null" / object() / array() / number() / string()
+    rule value() -> Json<'input>
+        = "false" { Json::Bool(false) }
+        / "true" { Json::Bool(true) }
+        / "null" { Json::Null }
+        / object()
+        / array()
+        / number()
+        / string()
 
-    rule object()
-        = "{" _ member() **<,128> value_separator() _ "}"
+    rule object() -> Json<'input>
+        = "{" _ pair:member() **<,32> value_separator() _ "}" { Json::Object(pair.into_iter().map(Box::new).collect()) }
 
-    rule member()
-        = string() _ ":" _ value()
+    rule member() -> Json<'input>
+        = key:string() _ ":" _ value:value() { Json::Pair { key: Box::new(key), value: Box::new(value) } }
 
-    rule array()
-        = "[" _ (value() **<,128> value_separator()) _ "]"
+    rule array() -> Json<'input>
+        = "[" _ val:value() **<,32> value_separator() _ "]" { Json::Array(val.into_iter().map(Box::new).collect()) }
 
-    rule number()
-        = "-"? int() frac()? exp()? {}
+    rule number() -> Json<'input>
+        = s:$("-"? int() frac()? exp()?) {? Ok(Json::Number(fast_float::parse(s).map_err(|x| "not a number")?)) }
 
     rule int()
         = ['0'] / ['1'..='9']['0'..='9']*
@@ -55,8 +66,8 @@ peg::parser!(grammar parser() for str {
         = "." ['0'..='9']*<1,32>
 
     // note: escaped chars not handled
-    rule string()
-        = "\"" (!"\"" [_])* "\""
+    rule string() -> Json<'input>
+        = str:$("\"" (!"\"" [_])* "\"") { Json::String(str) }
 });
 
 #[no_mangle]
@@ -88,6 +99,10 @@ pub extern "C" fn main(argc: usize, argv: *const *const u8) -> isize {
 "#;
     let x = parser::json(input);
 
-    libc_println!("{:?}", x);
+    libc_println!("{:#?}", x);
     0
 }
+
+mod langitem;
+
+mod windows_shim;
